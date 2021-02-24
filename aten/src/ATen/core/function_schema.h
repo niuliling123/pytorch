@@ -72,6 +72,14 @@ struct Argument {
           name(),
           "' to be of type 'Tensor' ",
           "because it was not annotated with an explicit type.\n");
+    } else if(type()->repr_str() == "float" || type()->repr_str() == "int") {
+      if (actual_type == "int" || actual_type == "float") {
+      inferred_type_hint = c10::str(
+          "Did you forget to assign a '",
+           type()->repr_str(),
+          "' literal for argument '",
+          name(), "'?");
+      }
     }
     return c10::str(
         "Expected a value of type '",
