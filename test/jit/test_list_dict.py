@@ -1694,3 +1694,94 @@ class TestDict(JitTestCase):
 
         with self.assertRaisesRegex(RuntimeError, r"Attempted to use Dict without contained types"):
             m = torch.jit.script(annotated_fn)
+
+
+class TestScriptDict(JitTestCase):
+    def _script_dict_add(self, d, k, v):
+        @torch.jit.script
+        def dict_add(d: Dict[int, int], k: int, v: int):
+            d[k] = v
+
+        dict_add(d, k, v)
+
+    def test_repr(self):
+        t = torch.jit.dict({1: 2})
+        exp = "{1: 2}"
+        self.assertEqual(repr(t), exp)
+
+    def test_bool(self):
+        true = torch.jit.dict({1: 2})
+        false = torch.jit.empty_dict(Dict[int, int])
+
+        self.assertEqual(bool(true), True)
+        self.assertEqual(bool(false), False)
+
+    def test_iter(self):
+        t = torch.jit.dict({1: 2, 3: 4})
+
+        s = 0
+        for k in t:
+            s += k
+
+        self.assertEqual(s, 4)
+
+    def test_items(self):
+        t = torch.jit.dict({1: 2, 3: 4})
+
+        s = 0
+        for k, v in t.items():
+            s += k * v
+
+        self.assertEqual(s, 14)
+
+    def test_getitem(self):
+        t = torch.jit.dict({1: 2, 3: 4})
+
+        self.assertEqual(t[1], 2)
+        self.assertEqual(t[3], 4)
+
+    def test_contains(self):
+        data = torch.jit.dict({1: 2, 3: 4})
+
+        self.assertEqual(1 in data, True)
+        self.assertEqual(2 in data, False)
+        self.assertEqual(3 in data, True)
+        self.assertEqual(4 in data, False)
+
+    def test_delitem(self):
+        data = torch.jit.dict({1: 2, 3: 4})
+
+        self.assertEqual(1 in data, True)
+        self.assertEqual(3 in data, True)
+
+        del data[1]
+
+        self.assertEqual(1 in data, False)
+        self.assertEqual(3 in data, True)
+
+    def test_len(self):
+        one = torch.jit.dict({1: 2})
+        zero = torch.jit.empty_dict(Dict[int, int])
+
+        self.assertEqual(len(one), 1)
+        self.assertEqual(len(zero), 0)
+
+    def test_nested(self):
+        nested = torch.jit.dict({1: {1: 2}, 2: {3: 4}}, Dict[int, Dict[int, int]])
+
+        one = nested[1]
+        two = nested[2]
+
+        self._script_dict_add(one, 9, 10)
+        self._script_dict_add(two, 11, 12)
+
+        self.assertEqual(len(nested[1]), 2)
+        self.assertEqual(len(nested[2]), 2)
+
+    def test_reference_semantics(self):
+        data = torch.jit.dict({1: 2})
+        self._script_dict_add(data, 3, 4)
+
+        self.assertEqual(len(data), 2)
+        self.assertEqual(3 in data, True)
+        self.assertEqual(data[3], 4)
