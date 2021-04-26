@@ -77,7 +77,6 @@ set(TORCH_PYTHON_INCLUDE_DIRECTORIES
     ${TORCH_SRC_DIR}/lib
     )
 
-
 list(APPEND TORCH_PYTHON_INCLUDE_DIRECTORIES ${LIBSHM_SRCDIR})
 
 set(TORCH_PYTHON_LINK_LIBRARIES
@@ -94,10 +93,7 @@ set(TORCH_PYTHON_LINK_FLAGS "")
 
 if(MSVC)
     string(APPEND TORCH_PYTHON_LINK_FLAGS " /NODEFAULTLIB:LIBCMT.LIB")
-    list(APPEND TORCH_PYTHON_LINK_LIBRARIES ${PYTHON_LIBRARIES})
-    if(BUILD_TEST)
-      list(APPEND TORCH_PYTHON_LINK_LIBRARIES onnx_library)
-    endif(BUILD_TEST)
+    list(APPEND TORCH_PYTHON_LINK_LIBRARIES ${PYTHON_LIBRARIES} onnx_library)
     if(NOT CMAKE_BUILD_TYPE MATCHES "Release")
       string(APPEND TORCH_PYTHON_LINK_FLAGS " /DEBUG:FULL")
     endif()
@@ -345,7 +341,7 @@ endif()
 add_custom_command(
   OUTPUT ${TORCH_SRC_DIR}/version.py
   COMMAND
-    touch ${TOOLS_PATH}/generate_torch_version.py
+    "${PYTHON_EXECUTABLE}" -c \"from pathlib import Path\; Path('${TOOLS_PATH}/generate_torch_version.py').touch()\"
   COMMAND
     "${PYTHON_EXECUTABLE}" ${TOOLS_PATH}/generate_torch_version.py
       --is_debug=${TORCH_VERSION_DEBUG}

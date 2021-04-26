@@ -8,6 +8,7 @@
 #include <ATen/cuda/CUDAMultiStreamGuard.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/util/irange.h>
 
 #include <torch/csrc/autograd/profiler.h>
 #include <gtest/gtest.h>
@@ -238,6 +239,41 @@ class AllgatherNCCLTest : public NCCLTest {
   }
 };
 
+class AllgatherBaseNCCLTest : public NCCLTest {
+ public:
+  AllgatherBaseNCCLTest(const std::string& path, int worldSize)
+      : NCCLTest(path, worldSize) {
+        output_tensor_ = at::empty({worldSize_, 3, 3}, at::kCUDA);
+      }
+
+  c10::intrusive_ptr<c10d::ProcessGroup::Work> run() {
+    // For the duration of this function, make THC use our streams
+    at::cuda::CUDAMultiStreamGuard guard(streams_);
+
+    launchDeviceSleep();
+    valueInitialization();
+    // contains at least one element otherwise wouldn't run.
+    // this is a flattened allgather, hence one rank contributes
+    // only 1 tensor, regardless of number of devices
+    return pg_->_allgather_base(output_tensor_, tensors_[0]);
+  }
+
+  at::Tensor getOutputTensor() {
+    at::cuda::CUDAMultiStreamGuard guard(streams_);
+    return output_tensor_.cpu();
+  }
+
+  at::Tensor getInputTensor() {
+    at::cuda::CUDAMultiStreamGuard guard(streams_);
+    return tensors_[0].cpu();
+  }
+
+
+  private:
+    at::Tensor output_tensor_;
+};
+
+
 struct ReduceScatterNCCLTest : NCCLTest {
   ReduceScatterNCCLTest(const std::string& path, int worldSize)
       : NCCLTest(path, worldSize) {}
@@ -272,10 +308,10 @@ void testAllreduce(const std::string& path, int rank, int size) {
   // Validation
   const int totalNumGPUs = test.numDevices() * size;
   const auto expected = (totalNumGPUs * (totalNumGPUs - 1)) / 2;
-  auto tensors = test.getTensors();
-  for (auto & tensor : tensors) {
-    auto data = tensor.data_ptr<float>();
-    for (auto k = 0; k < tensor.numel(); k++) {
+  const auto tensors = test.getTensors();
+  for (const auto & tensor : tensors) {
+    const auto *const data = tensor.data_ptr<float>();
+    for (const auto k : c10::irange(tensor.numel())) {
       EXPECT_EQ(data[k], expected)
           << "Allreduce ouputs do not match expected outputs";
     }
@@ -297,10 +333,10 @@ void testBroadcast(const std::string& path, int rank, int size) {
 
       // Check results
       const auto expected = (rootRank * numDevices + rootTensor);
-      auto tensors = test.getTensors();
-      for (auto & tensor : tensors) {
-        auto data = tensor.data_ptr<float>();
-        for (auto k = 0; k < tensor.numel(); k++) {
+      const auto tensors = test.getTensors();
+      for (const auto & tensor : tensors) {
+        const auto *const data = tensor.data_ptr<float>();
+        for (const auto k : c10::irange(tensor.numel())) {
           EXPECT_EQ(data[k], expected)
               << "Broadcast outputs do not match expected outputs";
         }
@@ -348,17 +384,38 @@ void testAllgather(const std::string& path, int rank, int size) {
   // Validation
   auto tensors = test.getOutputTensors();
   // device index
-  for (auto & i : tensors) {
+  for (auto & device : tensors) {
     // rank index
-    for (size_t j = 0; j < i.size(); ++j) {
+    for (const auto j : c10::irange(device.size())) {
       const auto expected = j;
-      auto& tensor = i[j];
+      auto& tensor = device[j];
       auto data = tensor.data_ptr<float>();
       for (auto k = 0; k < tensor.numel(); k++) {
         EXPECT_EQ(data[k], expected)
             << "Allgather outputs do not match expected outputs";
       }
     }
+  }
+}
+
+void testAllgatherBase(const std::string& path, int rank, int size) {
+  auto test = AllgatherBaseNCCLTest(path, size);
+  test.initialize(rank, size);
+  auto work = test.run();
+  // Wait for work to finish
+  test.wait(work);
+  // Validation
+  auto output_tensor = test.getOutputTensor();
+  auto input_tensor = test.getInputTensor();
+
+  auto data = output_tensor.data_ptr<float>();
+
+  // Rank index
+  for (const auto i : c10::irange(output_tensor.numel())) {
+    // expected is i // input.numel() <- rank, and each rank contributed rank * num_gpu
+    const auto expected = (i / input_tensor.numel()) * test.numDevices();
+    EXPECT_EQ(data[i], expected)
+          << "Allgather_base outputs do not match expected outputs";
   }
 }
 
@@ -384,6 +441,31 @@ void testReduceScatter(const std::string& path, int rank, int size) {
       EXPECT_EQ(data[j], expected) << "ReduceScatter outputs do not match expected outputs!";
     }
   }
+}
+
+void testSequenceNumInit(const std::string& path, int /* unused */, int /* unused */) {
+  // Note: ProcessGroupNCCLTest doesn't support multiprocess testing. So we
+  // simulate world_size > 1 here via threads.
+  const int worldSize = 4;
+  std::mutex m;
+  std::unordered_set<uint64_t> nums;
+  auto runTest = [&](int i) {
+    NCCLTest test(path, worldSize);
+    test.initialize(i, worldSize);
+    test.getProcessGroup().setSequenceNumberForGroup();
+    std::lock_guard<std::mutex> lock(m);
+    auto seqNum = test.getProcessGroup().getSequenceNumberForGroup();
+    nums.insert(seqNum);
+  };
+  std::vector<std::thread> threads;
+  threads.reserve(worldSize);
+  for (int r = 0; r < worldSize; ++r) {
+    threads.emplace_back(std::thread([=]() { runTest(r); }));
+  }
+  for (auto& t : threads) {
+    t.join();
+  }
+  EXPECT_EQ(nums.size(), 1);
 }
 
 class ProcessGroupNCCLTest: public ::testing::Test {
@@ -459,6 +541,16 @@ TEST_F(ProcessGroupNCCLTest, testAllgather) {
   }
 }
 
+TEST_F(ProcessGroupNCCLTest, testAllgatherBase) {
+  if (skipTest()) {
+    return;
+  }
+  {
+    TemporaryFile file;
+    testAllgatherBase(file.path, rank_, size_);
+  }
+}
+
 TEST_F(ProcessGroupNCCLTest, testReduceScatter) {
   if (skipTest()) {
     return;
@@ -466,6 +558,16 @@ TEST_F(ProcessGroupNCCLTest, testReduceScatter) {
   {
     TemporaryFile file;
     testReduceScatter(file.path, rank_, size_);
+  }
+}
+
+TEST_F(ProcessGroupNCCLTest, testSequenceNumInit) {
+  if (skipTest()) {
+    return;
+  }
+  {
+    TemporaryFile file;
+    testSequenceNumInit(file.path, rank_, size_);
   }
 }
 
